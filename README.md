@@ -7,6 +7,19 @@
 - `build/`：中间编译产物
 - `c-mcp-server`：最终可执行文件
 
+环境要求:
+- Linux / POSIX: 当前实现基于 POSIX 套接字和标准 Unix 头文件（`arpa/inet.h`、`sys/socket.h`、`unistd.h` 等）。
+- Windows: 当前代码未直接支持 Windows，需移植网络层到 Winsock 并替换 POSIX 相关系统调用。
+
+Linux 构建依赖:
+- `gcc` 或兼容的 C11 编译器
+- `make`
+- POSIX 开发环境
+
+Windows 构建说明（需移植）:
+- 需要使用 MinGW/MSYS2 或 Visual Studio，并替换 POSIX 网络接口为 Winsock。
+- 当前项目的 `Makefile` 和 `src/*.c` 仍假设 POSIX 环境。
+
 特性:
 - HTTP POST 统一路径 `/mcp/api`
 - 支持 Streamable HTTP chunked 响应
