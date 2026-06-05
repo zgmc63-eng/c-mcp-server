@@ -21,6 +21,7 @@ static int send_all(int sock, const char *buf, size_t len) {
     while (sent < len) {
         ssize_t n = send(sock, buf + sent, len - sent, 0);
         if (n <= 0) {
+            fprintf(stderr, "[http_server] send_all: send() failed: %s\n", strerror(errno));
             return -1;
         }
         sent += (size_t)n;
@@ -142,11 +143,17 @@ static int get_header_value(const char *header, const char *name, char *value, s
 /* 读取 HTTP 头部直到遇到 CRLF CRLF 结束标记。
  * 使用块读取以提高效率，并返回接收的字节数（不包含末尾的 '\0'）。
  */
-static int receive_header(int sock, char *buffer, size_t buffer_sz) {
+static int receive_header(int sock, char *buffer, size_t buffer_sz, char *extra_buf, size_t extra_buf_sz, size_t *extra_len) {
     size_t offset = 0;
+    if (extra_len) *extra_len = 0;
     while (offset + 1 < buffer_sz) {
         ssize_t n = recv(sock, buffer + offset, (int)(buffer_sz - offset - 1), 0);
         if (n <= 0) {
+            if (n == 0) {
+                fprintf(stderr, "[http_server] receive_header: peer closed connection (recv returned 0)\n");
+            } else {
+                fprintf(stderr, "[http_server] receive_header: recv() error: %s\n", strerror(errno));
+            }
             return -1;
         }
         offset += (size_t)n;
@@ -157,6 +164,15 @@ static int receive_header(int sock, char *buffer, size_t buffer_sz) {
                     /* 将头部截断并以字符串形式返回 */
                     size_t header_len = i + 4;
                     if (header_len >= buffer_sz) return -1;
+                    /* 计算并复制额外读到的 body 字节（如果有）到 extra_buf */
+                    size_t extra = offset - header_len;
+                    if (extra > 0 && extra_buf && extra_buf_sz > 0) {
+                        size_t to_copy = extra > extra_buf_sz ? extra_buf_sz : extra;
+                        memcpy(extra_buf, buffer + header_len, to_copy);
+                        if (extra_len) *extra_len = to_copy;
+                    } else if (extra_len) {
+                        *extra_len = 0;
+                    }
                     buffer[header_len] = '\0';
                     return (int)header_len;
                 }
@@ -176,6 +192,11 @@ static int receive_exact(int sock, char *buffer, size_t length) {
     while (received < length) {
         ssize_t n = recv(sock, buffer + received, length - received, 0);
         if (n <= 0) {
+            if (n == 0) {
+                fprintf(stderr, "[http_server] receive_exact: peer closed connection (recv returned 0)\n");
+            } else {
+                fprintf(stderr, "[http_server] receive_exact: recv() error: %s\n", strerror(errno));
+            }
             return -1;
         }
         received += (size_t)n;
@@ -221,8 +242,12 @@ static void handle_client(int client_sock) {
     setsockopt(client_sock, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof(tv));
 
     char header[8192];
-    int header_len = receive_header(client_sock, header, sizeof(header));
+    /* 临时缓冲用于保存 receive_header 多读到的 body 字节（若有） */
+    char extra_body[65536];
+    size_t extra_len = 0;
+    int header_len = receive_header(client_sock, header, sizeof(header), extra_body, sizeof(extra_body), &extra_len);
     if (header_len <= 0) {
+        fprintf(stderr, "[http_server] handle_client: receive_header failed for fd=%d\n", client_sock);
         close(client_sock);
         return;
     }
@@ -230,6 +255,7 @@ static void handle_client(int client_sock) {
     char method[16] = {0};
     char path[256] = {0};
     if (!parse_request_line(header, method, sizeof(method), path, sizeof(path))) {
+        fprintf(stderr, "[http_server] invalid request line, fd=%d, raw header:\n%s\n", client_sock, header);
         send_simple_response(client_sock, 400, "Bad Request", "{\"error\":\"Invalid request line\"}");
         close(client_sock);
         return;
@@ -237,6 +263,7 @@ static void handle_client(int client_sock) {
 
     /* 仅支持 POST /mcp/api，其他请求返回 404。*/
     if (strcmp(method, "POST") != 0 || strcmp(path, "/mcp/api") != 0) {
+        fprintf(stderr, "[http_server] request rejected, fd=%d, method=%s path=%s\nraw header:\n%s\n", client_sock, method, path, header);
         send_simple_response(client_sock, 404, "Not Found", "{\"error\":\"Endpoint not found\"}");
         close(client_sock);
         return;
@@ -271,10 +298,22 @@ static void handle_client(int client_sock) {
         return;
     }
 
-    if (receive_exact(client_sock, body, content_length) < 0) {
-        free(body);
-        close(client_sock);
-        return;
+    /* 使用 receive_header 时可能已经多读到一些 body 字节，先复制这些字节（如果存在） */
+    size_t received = 0;
+    if (extra_len > 0) {
+        size_t to_copy = extra_len > content_length ? content_length : extra_len;
+        memcpy(body, extra_body, to_copy);
+        received = to_copy;
+    }
+
+    if (received < content_length) {
+        /* 读取剩余字节 */
+        if (receive_exact(client_sock, body + received, content_length - received) < 0) {
+            fprintf(stderr, "[http_server] handle_client: receive_exact failed for fd=%d (received=%zu expected=%zu)\n", client_sock, received, content_length);
+            free(body);
+            close(client_sock);
+            return;
+        }
     }
     body[content_length] = '\0';
     char response[8192];
@@ -291,14 +330,18 @@ static void handle_client(int client_sock) {
                                 "Connection: close\r\n"
                                 "\r\n");
     if (header_bytes < 0 || (size_t)header_bytes >= sizeof(header_buf)) {
+        fprintf(stderr, "[http_server] handle_client: header formatting truncated for fd=%d\n", client_sock);
         close(client_sock);
         return;
     }
     if (send_all(client_sock, header_buf, (size_t)header_bytes) < 0) {
+        fprintf(stderr, "[http_server] handle_client: send_all header failed for fd=%d\n", client_sock);
         close(client_sock);
         return;
     }
-    send_chunked_data(client_sock, response);
+    if (send_chunked_data(client_sock, response) < 0) {
+        fprintf(stderr, "[http_server] handle_client: send_chunked_data failed for fd=%d\n", client_sock);
+    }
     close(client_sock);
 }
 
@@ -342,6 +385,9 @@ int run_mcp_server(unsigned short port) {
             perror("accept");
             continue;
         }
+        char client_ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
+        fprintf(stderr, "[http_server] accepted connection from %s:%u, fd=%d\n", client_ip, ntohs(client_addr.sin_port), client_sock);
         handle_client(client_sock);
     }
 
