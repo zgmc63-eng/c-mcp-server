@@ -1,4 +1,6 @@
-CC = gcc
+CROSS_COMPILE := arm-linux-gnueabihf-
+
+CC = $(CROSS_COMPILE)gcc
 CFLAGS = -std=c11 -O2 -Wall -Wextra
 CPPFLAGS = -I./src
 LDFLAGS =

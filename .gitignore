@@ -6,3 +6,6 @@
 
 # 忽略build目录及其所有内容
 build/
+
+# 忽略 c-mcp-server
+c-mcp-server
