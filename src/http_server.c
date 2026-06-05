@@ -29,7 +29,8 @@ static int send_all(int sock, const char *buf, size_t len) {
 
 /*
  * 以 HTTP Chunked Transfer Encoding 方式分块发送字符串。
- * 这支持 Streamable HTTP 响应，即服务器可以逐块发送数据。
+ * 由于最终 JSON 响应长度动态生成，这里不需要预先计算 Content-Length，
+ * 而是逐块写入数据，并在末尾写入 "0\r\n\r\n" 结束标记。
  */
 static int send_chunked_data(int sock, const char *data) {
     const size_t chunk_size = 128;
@@ -104,7 +105,8 @@ static int parse_request_line(const char *header, char *method, size_t method_sz
 }
 
 /*
- * 从 HTTP 头部查找指定字段值，例如 Content-Length。
+ * 从 HTTP 头部中查找指定字段名的值，例如 Content-Length。
+ * 返回 1 表示找到对应值，0 表示未找到或缓冲区不足。
  */
 static int get_header_value(const char *header, const char *name, char *value, size_t value_sz) {
     const char *p = header;
@@ -136,7 +138,8 @@ static int get_header_value(const char *header, const char *name, char *value, s
 }
 
 /*
- * 读取 HTTP 头部直到 CRLF CRLF 为止。
+ * 读取 HTTP 头部直到遇到 CRLF CRLF 结束标记。
+ * HTTP 请求头部可能分多次到达，此函数循环读取直到完整头部被接收。
  */
 static int receive_header(int sock, char *buffer, size_t buffer_sz) {
     size_t offset = 0;
@@ -159,7 +162,8 @@ static int receive_header(int sock, char *buffer, size_t buffer_sz) {
 }
 
 /*
- * 读取指定长度的请求体。
+ * 读取指定长度的请求体内容，并确保完整接收。
+ * 该函数用于 Content-Length 已知的 POST JSON 身体。
  */
 static int receive_exact(int sock, char *buffer, size_t length) {
     size_t received = 0;
@@ -194,6 +198,14 @@ static void send_simple_response(int sock, int status_code, const char *status_t
 /*
  * 处理单个客户端请求：解析 HTTP 头部、读取请求体、调度 MCP JSON-RPC。
  */
+/*
+ * 处理客户端连接的完整流程：
+ * 1) 读取并解析 HTTP 请求头
+ * 2) 只支持 POST /mcp/api
+ * 3) 读取 Content-Length 指定的请求体
+ * 4) 将请求体传给 MCP dispatch
+ * 5) 以 chunked transfer 方式发送 JSON-RPC 响应
+ */
 static void handle_client(int client_sock) {
     char header[8192];
     int header_len = receive_header(client_sock, header, sizeof(header));
@@ -210,6 +222,7 @@ static void handle_client(int client_sock) {
         return;
     }
 
+    /* 仅支持 POST /mcp/api，其他请求返回 404。*/
     if (strcmp(method, "POST") != 0 || strcmp(path, "/mcp/api") != 0) {
         send_simple_response(client_sock, 404, "Not Found", "{\"error\":\"Endpoint not found\"}");
         close(client_sock);
@@ -232,6 +245,7 @@ static void handle_client(int client_sock) {
 
     char *body = malloc(content_length + 1);
     if (!body) {
+        /* 内存分配失败时直接返回 500 错误码。*/
         send_simple_response(client_sock, 500, "Internal Server Error", "{\"error\":\"Allocation failed\"}");
         close(client_sock);
         return;

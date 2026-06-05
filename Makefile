@@ -1,8 +1,8 @@
 CC = gcc
 CFLAGS = -std=c11 -O2 -Wall -Wextra -I./src
 TARGET = c-mcp-server
-SRCS = src/main.c src/api.c src/http_server.c src/cJSON.c src/tools.c
-OBJS = build/main.o build/api.o build/http_server.o build/cJSON.o build/tools.o
+SRCS = src/main.c src/api.c src/http_server.c src/cJSON.c src/tools.c src/resources.c
+OBJS = build/main.o build/api.o build/http_server.o build/cJSON.o build/tools.o build/resources.o
 BUILD_DIR = build
 
 all: $(TARGET)

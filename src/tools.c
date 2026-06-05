@@ -7,10 +7,12 @@
 
 #define MAX_TOOLS 16
 
+/* 工具注册表：一个简单的静态数组，用于保存可调用的 MCP 工具定义。*/
 static const mcp_tool_t *tool_registry[MAX_TOOLS];
 static size_t tool_count = 0;
 
 /* 将 cJSON 对象转换为紧凑的 JSON 字符串。
+ * 这个字符串会被写入 MCP response 结果里。
  * 调用者负责释放返回值。
  */
 static char *print_json(const cJSON *json) {
@@ -18,6 +20,7 @@ static char *print_json(const cJSON *json) {
 }
 
 int register_tool(const mcp_tool_t *tool) {
+    /* 注册一个新的 MCP 工具，防止重复注册。*/
     if (tool == NULL || tool->name == NULL || tool->handler == NULL) {
         return 0;
     }
@@ -34,6 +37,7 @@ int register_tool(const mcp_tool_t *tool) {
 }
 
 const mcp_tool_t *find_tool(const char *name) {
+    /* 根据工具名称查找已注册工具，返回匹配项或 NULL。*/
     if (name == NULL) {
         return NULL;
     }
@@ -46,10 +50,12 @@ const mcp_tool_t *find_tool(const char *name) {
 }
 
 size_t get_registered_tool_count(void) {
+    /* 返回当前注册的工具数量。*/
     return tool_count;
 }
 
 const mcp_tool_t *get_registered_tool(size_t index) {
+    /* 根据索引返回已注册工具，越界时返回 NULL。*/
     if (index >= tool_count) {
         return NULL;
     }
@@ -57,6 +63,9 @@ const mcp_tool_t *get_registered_tool(size_t index) {
 }
 
 static cJSON *weather_query_schema(void) {
+    /* 返回 weather_query 工具的参数 JSON Schema。
+     * 该 schema 用于 tools/list 响应中的 tool.inputSchema 字段。
+     */
     cJSON *schema = cJSON_CreateObject();
     cJSON_AddStringToObject(schema, "type", "object");
 
@@ -77,6 +86,7 @@ static cJSON *weather_query_schema(void) {
 }
 
 static int weather_query_handler(const cJSON *arguments, cJSON *result_obj) {
+    /* 处理 weather_query 工具调用，返回简化天气文本结果。*/
     if (!cJSON_IsObject(arguments) || result_obj == NULL) {
         return 0;
     }
@@ -108,6 +118,7 @@ static int weather_query_handler(const cJSON *arguments, cJSON *result_obj) {
 }
 
 static void make_tool_list_json(cJSON *tools_array) {
+    /* 将每个已注册工具转换成 tools/list 响应中的 JSON 对象。*/
     size_t count = get_registered_tool_count();
     for (size_t i = 0; i < count; i++) {
         const mcp_tool_t *tool = get_registered_tool(i);
@@ -141,6 +152,12 @@ static int initialize_handler(const char *params_json, char *result_buf, size_t 
     cJSON *tools_capabilities = cJSON_CreateObject();
     cJSON_AddBoolToObject(tools_capabilities, "listChanged", 0);
     cJSON_AddItemToObject(capabilities, "tools", tools_capabilities);
+
+    cJSON *resources_capabilities = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resources_capabilities, "listChanged", 0);
+    cJSON_AddBoolToObject(resources_capabilities, "subscribe", 0);
+    cJSON_AddItemToObject(capabilities, "resources", resources_capabilities);
+
     cJSON_AddItemToObject(result, "capabilities", capabilities);
 
     cJSON *server_info = cJSON_CreateObject();
@@ -169,6 +186,7 @@ static int notifications_initialized_handler(const char *params_json, char *resu
 static int tools_list_handler(const char *params_json, char *result_buf, size_t result_buf_size) {
     (void)params_json;
 
+    /* 处理 tools/list 请求，返回当前注册的工具列表。*/
     cJSON *result = cJSON_CreateObject();
     cJSON *tools_array = cJSON_CreateArray();
     cJSON_AddItemToObject(result, "tools", tools_array);
@@ -185,6 +203,7 @@ static int tools_list_handler(const char *params_json, char *result_buf, size_t 
 }
 
 static int tools_call_handler(const char *params_json, char *result_buf, size_t result_buf_size) {
+    /* 解析 tools/call 请求参数并查找目标工具。*/
     cJSON *params = cJSON_Parse(params_json);
     if (params == NULL || !cJSON_IsObject(params)) {
         snprintf(result_buf, result_buf_size, "{\"content\":[],\"isError\":true,\"error\":\"Invalid params\"}");
@@ -196,6 +215,7 @@ static int tools_call_handler(const char *params_json, char *result_buf, size_t 
     cJSON *arguments = cJSON_GetObjectItemCaseSensitive(params, "arguments");
     cJSON *arguments_owned = NULL;
     if (arguments == NULL) {
+        /* 如果未传递 arguments，则创建一个空对象，避免 NULL 处理。*/
         arguments_owned = cJSON_CreateObject();
         arguments = arguments_owned;
     }
@@ -221,6 +241,7 @@ static int tools_call_handler(const char *params_json, char *result_buf, size_t 
         return 0;
     }
 
+    /* 调用工具处理函数并将结果封装进 tool_result。*/
     if (!tool->handler(arguments, tool_result)) {
         cJSON_Delete(tool_result);
         snprintf(result_buf, result_buf_size, "{\"content\":[],\"isError\":true,\"error\":\"Tool execution failed\"}");
@@ -264,6 +285,12 @@ void register_default_mcp_tools(void) {
     };
     register_tool(&weather_tool);
 }
+
+/*
+ * 可复制的工具示例模板：
+ * 将以下注释示例复制到本文件或新的源文件中并在初始化时调用 register_tool(&your_tool);
+ * 代码示例参见 README 中的工具样板。
+ */
 
 void register_default_mcp_methods(void) {
     register_mcp_method("initialize", initialize_handler);

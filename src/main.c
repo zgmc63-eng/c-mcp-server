@@ -4,7 +4,7 @@
 
 /*
  * 程序入口。
- * 初始化默认 MCP 方法后启动 HTTP 服务器。
+ * 先初始化 MCP 默认方法、工具和资源接口，然后启动一个监听 HTTP POST /mcp/api 的服务器。
  */
 int main(void) {
     if (mcp_init_default_methods() != 0) {
