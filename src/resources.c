@@ -90,31 +90,47 @@ static int resources_list_handler(const char *params_json, char *result_buf, siz
     if (!json_text) {
         return 0;
     }
-    snprintf(result_buf, result_buf_size, "%s", json_text);
+    size_t len = strlen(json_text);
+    if (len >= result_buf_size) {
+        cJSON_free(json_text);
+        return 0;
+    }
+    memcpy(result_buf, json_text, len + 1);
     cJSON_free(json_text);
     return 1;
 }
 
 static int resources_read_handler(const char *params_json, char *result_buf, size_t result_buf_size) {
     /* 处理 resources/read 请求，读取指定 URI 的资源内容。*/
-    cJSON *params = cJSON_Parse(params_json);
+    cJSON *params = NULL;
+    cJSON *result = NULL;
+    char *json_text = NULL;
+    int success = 0;
+
+    params = cJSON_Parse(params_json);
     if (params == NULL || !cJSON_IsObject(params)) {
-        cJSON_Delete(params);
-        snprintf(result_buf, result_buf_size, "{\"contents\":[]}");
-        return 1;
+        const char *empty = "{\"contents\":[]}";
+        size_t el = strlen(empty);
+        if (el < result_buf_size) {
+            memcpy(result_buf, empty, el + 1);
+            success = 1;
+        }
+        goto cleanup;
     }
 
     cJSON *uri_item = cJSON_GetObjectItemCaseSensitive(params, "uri");
     if (!cJSON_IsString(uri_item) || uri_item->valuestring == NULL) {
-        cJSON_Delete(params);
-        snprintf(result_buf, result_buf_size, "{\"contents\":[]}");
-        return 1;
+        const char *empty = "{\"contents\":[]}";
+        size_t el2 = strlen(empty);
+        if (el2 < result_buf_size) {
+            memcpy(result_buf, empty, el2 + 1);
+            success = 1;
+        }
+        goto cleanup;
     }
 
     const mcp_resource_t *resource = find_resource(uri_item->valuestring);
-    cJSON_Delete(params);
-
-    cJSON *result = cJSON_CreateObject();
+    result = cJSON_CreateObject();
     cJSON *contents = cJSON_CreateArray();
     cJSON_AddItemToObject(result, "contents", contents);
 
@@ -128,14 +144,28 @@ static int resources_read_handler(const char *params_json, char *result_buf, siz
         cJSON_AddItemToArray(contents, item);
     }
 
-    char *json_text = serialize_json(result);
-    cJSON_Delete(result);
+    json_text = serialize_json(result);
     if (!json_text) {
-        return 0;
+        goto cleanup;
     }
-    snprintf(result_buf, result_buf_size, "%s", json_text);
-    cJSON_free(json_text);
-    return 1;
+    size_t len3 = strlen(json_text);
+    if (len3 >= result_buf_size) {
+        goto cleanup;
+    }
+    memcpy(result_buf, json_text, len3 + 1);
+    success = 1;
+
+cleanup:
+    if (json_text) {
+        cJSON_free(json_text);
+    }
+    if (result) {
+        cJSON_Delete(result);
+    }
+    if (params) {
+        cJSON_Delete(params);
+    }
+    return success;
 }
 
 /* 默认注册的资源示例：server_info。*/

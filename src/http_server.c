@@ -9,6 +9,7 @@
 #include <strings.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 /*
@@ -41,6 +42,7 @@ static int send_chunked_data(int sock, const char *data) {
         size_t current = len < chunk_size ? len : chunk_size;
         char header[32];
         int header_len = snprintf(header, sizeof(header), "%zx\r\n", current);
+        if (header_len < 0 || (size_t)header_len >= sizeof(header)) return -1;
         if (send_all(sock, header, (size_t)header_len) < 0) {
             return -1;
         }
@@ -137,26 +139,30 @@ static int get_header_value(const char *header, const char *name, char *value, s
     return 0;
 }
 
-/*
- * 读取 HTTP 头部直到遇到 CRLF CRLF 结束标记。
- * HTTP 请求头部可能分多次到达，此函数循环读取直到完整头部被接收。
+/* 读取 HTTP 头部直到遇到 CRLF CRLF 结束标记。
+ * 使用块读取以提高效率，并返回接收的字节数（不包含末尾的 '\0'）。
  */
 static int receive_header(int sock, char *buffer, size_t buffer_sz) {
     size_t offset = 0;
     while (offset + 1 < buffer_sz) {
-        ssize_t n = recv(sock, buffer + offset, 1, 0);
+        ssize_t n = recv(sock, buffer + offset, (int)(buffer_sz - offset - 1), 0);
         if (n <= 0) {
             return -1;
         }
         offset += (size_t)n;
-        if (offset >= 4 &&
-            buffer[offset - 4] == '\r' &&
-            buffer[offset - 3] == '\n' &&
-            buffer[offset - 2] == '\r' &&
-            buffer[offset - 1] == '\n') {
-            buffer[offset] = '\0';
-            return (int)offset;
+        if (offset >= 4) {
+            /* 查找终止序列 */
+            for (size_t i = 0; i + 3 < offset; i++) {
+                if (buffer[i] == '\r' && buffer[i+1] == '\n' && buffer[i+2] == '\r' && buffer[i+3] == '\n') {
+                    /* 将头部截断并以字符串形式返回 */
+                    size_t header_len = i + 4;
+                    if (header_len >= buffer_sz) return -1;
+                    buffer[header_len] = '\0';
+                    return (int)header_len;
+                }
+            }
         }
+        /* 如果还没找到，继续读取 */
     }
     return -1;
 }
@@ -191,6 +197,7 @@ static void send_simple_response(int sock, int status_code, const char *status_t
                               status_code,
                               status_text,
                               strlen(json_body));
+    if (header_len < 0 || (size_t)header_len >= sizeof(header)) return;
     send_all(sock, header, (size_t)header_len);
     send_all(sock, json_body, strlen(json_body));
 }
@@ -207,6 +214,12 @@ static void send_simple_response(int sock, int status_code, const char *status_t
  * 5) 以 chunked transfer 方式发送 JSON-RPC 响应
  */
 static void handle_client(int client_sock) {
+    /* 设置接收超时，避免慢速/挂起客户端无限阻塞 */
+    struct timeval tv;
+    tv.tv_sec = 10; /* 10 秒超时 */
+    tv.tv_usec = 0;
+    setsockopt(client_sock, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof(tv));
+
     char header[8192];
     int header_len = receive_header(client_sock, header, sizeof(header));
     if (header_len <= 0) {
@@ -235,8 +248,15 @@ static void handle_client(int client_sock) {
         close(client_sock);
         return;
     }
-
-    size_t content_length = (size_t)atoi(content_length_value);
+    char *endptr = NULL;
+    errno = 0;
+    unsigned long v = strtoul(content_length_value, &endptr, 10);
+    if (endptr == content_length_value || *endptr != '\0' || errno != 0) {
+        send_simple_response(client_sock, 400, "Bad Request", "{\"error\":\"Invalid Content-Length\"}");
+        close(client_sock);
+        return;
+    }
+    size_t content_length = (size_t)v;
     if (content_length == 0 || content_length > 65536) {
         send_simple_response(client_sock, 400, "Bad Request", "{\"error\":\"Invalid Content-Length\"}");
         close(client_sock);
@@ -257,7 +277,6 @@ static void handle_client(int client_sock) {
         return;
     }
     body[content_length] = '\0';
-
     char response[8192];
     if (!dispatch_mcp_request(body, response, sizeof(response))) {
         /* dispatch_mcp_request 已在 response 中写入错误响应。*/
@@ -271,6 +290,10 @@ static void handle_client(int client_sock) {
                                 "Transfer-Encoding: chunked\r\n"
                                 "Connection: close\r\n"
                                 "\r\n");
+    if (header_bytes < 0 || (size_t)header_bytes >= sizeof(header_buf)) {
+        close(client_sock);
+        return;
+    }
     if (send_all(client_sock, header_buf, (size_t)header_bytes) < 0) {
         close(client_sock);
         return;

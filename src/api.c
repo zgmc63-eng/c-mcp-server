@@ -62,17 +62,20 @@ void register_mcp_method(const char *method, mcp_handler_t handler) {
 /* 将 JSON-RPC 请求中的 id 对象序列化为字符串，直接写入 id_buf。*/
 static void serialize_jsonrpc_id(const cJSON *id_item, char *id_buf, size_t id_buf_size) {
     if (id_item == NULL) {
-        snprintf(id_buf, id_buf_size, "null");
+        int n = snprintf(id_buf, id_buf_size, "null");
+        if (n < 0 || (size_t)n >= id_buf_size) { if (id_buf_size > 0) id_buf[0] = '\0'; }
         return;
     }
 
     /* cJSON_PrintUnformatted 会返回一个已经分配的字符串。*/
     char *id_text = cJSON_PrintUnformatted(id_item);
     if (id_text == NULL) {
-        snprintf(id_buf, id_buf_size, "null");
+        int n2 = snprintf(id_buf, id_buf_size, "null");
+        if (n2 < 0 || (size_t)n2 >= id_buf_size) { if (id_buf_size > 0) id_buf[0] = '\0'; }
         return;
     }
-    snprintf(id_buf, id_buf_size, "%s", id_text);
+    int n3 = snprintf(id_buf, id_buf_size, "%s", id_text);
+    if (n3 < 0 || (size_t)n3 >= id_buf_size) { if (id_buf_size > 0) id_buf[0] = '\0'; }
     cJSON_free(id_text);
 }
 
@@ -99,11 +102,14 @@ static void make_error_response(const cJSON *id_item,
                                 size_t out_sz) {
     char id_text[128];
     serialize_jsonrpc_id(id_item, id_text, sizeof(id_text));
-    snprintf(out, out_sz,
-             "{\"jsonrpc\":\"2.0\",\"mcp\":\"1.0\",\"error\":{\"code\":%d,\"message\":\"%s\"},\"id\":%s}",
-             code,
-             message,
-             id_text);
+    int n = snprintf(out, out_sz,
+                     "{\"jsonrpc\":\"2.0\",\"mcp\":\"1.0\",\"error\":{\"code\":%d,\"message\":\"%s\"},\"id\":%s}",
+                     code,
+                     message,
+                     id_text);
+    if (n < 0 || (size_t)n >= out_sz) {
+        if (out_sz > 0) out[0] = '\0';
+    }
 }
 
 int dispatch_mcp_request(const char *request_json, char *response_buf, size_t response_buf_size) {
@@ -111,12 +117,15 @@ int dispatch_mcp_request(const char *request_json, char *response_buf, size_t re
         return 0;
     }
 
+    cJSON *request = NULL;
+    char *params_text = NULL;
+    int result = 0;
+
     /* 1) 解析请求 JSON 并验证结构。*/
-    cJSON *request = cJSON_Parse(request_json);
+    request = cJSON_Parse(request_json);
     if (request == NULL || !cJSON_IsObject(request)) {
         make_error_response(NULL, -32700, "Parse error: invalid JSON", response_buf, response_buf_size);
-        cJSON_Delete(request);
-        return 0;
+        goto cleanup;
     }
 
     cJSON *id_item = cJSON_GetObjectItemCaseSensitive(request, "id");
@@ -125,103 +134,104 @@ int dispatch_mcp_request(const char *request_json, char *response_buf, size_t re
     cJSON *jsonrpc_item = cJSON_GetObjectItemCaseSensitive(request, "jsonrpc");
     if (!cJSON_IsString(jsonrpc_item) || strcmp(jsonrpc_item->valuestring, "2.0") != 0) {
         if (is_notification) {
-            cJSON_Delete(request);
             response_buf[0] = '\0';
-            return 1;
+            result = 1;
+            goto cleanup;
         }
         make_error_response(NULL, -32600, "Invalid Request: unsupported JSON-RPC version", response_buf, response_buf_size);
-        cJSON_Delete(request);
-        return 0;
+        goto cleanup;
     }
 
     cJSON *method_item = cJSON_GetObjectItemCaseSensitive(request, "method");
     if (!cJSON_IsString(method_item)) {
         if (is_notification) {
-            cJSON_Delete(request);
             response_buf[0] = '\0';
-            return 1;
+            result = 1;
+            goto cleanup;
         }
         make_error_response(NULL, -32600, "Invalid Request: missing method", response_buf, response_buf_size);
-        cJSON_Delete(request);
-        return 0;
+        goto cleanup;
     }
 
     /* 4) 如果请求携带 params，则将其序列化为字符串，统一传递给 handler。*/
     cJSON *params_item = cJSON_GetObjectItemCaseSensitive(request, "params");
-    char *params_text = serialize_params(params_item);
+    params_text = serialize_params(params_item);
     if (params_text == NULL) {
         if (is_notification) {
-            cJSON_Delete(request);
             response_buf[0] = '\0';
-            return 1;
+            result = 1;
+            goto cleanup;
         }
         make_error_response(id_item, -32000, "Internal error: cannot serialize params", response_buf, response_buf_size);
-        cJSON_Delete(request);
-        return 0;
+        goto cleanup;
     }
 
     /* 5) 查找请求指定的方法处理器，并调用它。*/
     mcp_handler_t handler = find_handler(method_item->valuestring);
     if (handler == NULL) {
-        /* 如果是通知请求，不需要返回错误响应，直接忽略。*/
         if (is_notification) {
-            free(params_text);
-            cJSON_Delete(request);
             response_buf[0] = '\0';
-            return 1;
+            result = 1;
+            goto cleanup;
         }
         make_error_response(id_item, -32601, "Method not found", response_buf, response_buf_size);
-        free(params_text);
-        cJSON_Delete(request);
-        return 0;
+        goto cleanup;
     }
 
     char result_json[4096] = {0};
     if (!handler(params_text, result_json, sizeof(result_json))) {
-        /* 6) 处理器返回 false 表示内部执行失败。*/
         if (is_notification) {
-            free(params_text);
-            cJSON_Delete(request);
             response_buf[0] = '\0';
-            return 1;
+            result = 1;
+            goto cleanup;
         }
         make_error_response(id_item, -32000, "Internal error in handler", response_buf, response_buf_size);
-        free(params_text);
-        cJSON_Delete(request);
-        return 0;
+        goto cleanup;
     }
-
-    free(params_text);
 
     char id_text[128];
     serialize_jsonrpc_id(id_item, id_text, sizeof(id_text));
 
-    /* 7) 构造标准 JSON-RPC 响应，并将 handler 返回的 result 直接嵌入。*/
-    snprintf(response_buf,
-             response_buf_size,
-             "{\"jsonrpc\":\"2.0\",\"mcp\":\"1.0\",\"result\":%s,\"id\":%s}",
-             result_json,
-             id_text);
+    int rn = snprintf(response_buf,
+                      response_buf_size,
+                      "{\"jsonrpc\":\"2.0\",\"mcp\":\"1.0\",\"result\":%s,\"id\":%s}",
+                      result_json,
+                      id_text);
+    if (rn < 0 || (size_t)rn >= response_buf_size) {
+        make_error_response(id_item, -32000, "Internal error: response truncated", response_buf, response_buf_size);
+        goto cleanup;
+    }
 
-    cJSON_Delete(request);
-    return 1;
+    result = 1;
+
+cleanup:
+    if (params_text) {
+        free(params_text);
+    }
+    if (request) {
+        cJSON_Delete(request);
+    }
+    return result;
 }
 
 static int echo_handler(const char *params_json, char *result_buf, size_t result_buf_size) {
     /* echo 处理器直接返回收到的 params JSON，保持原始结构不变。*/
     if (params_json == NULL || params_json[0] == '\0') {
-        snprintf(result_buf, result_buf_size, "{}");
+        const char *d = "{}";
+        size_t dl = strlen(d);
+        if (dl < result_buf_size) memcpy(result_buf, d, dl + 1);
         return 1;
     }
-    snprintf(result_buf, result_buf_size, "%s", params_json);
+    size_t pl = strlen(params_json);
+    if (pl < result_buf_size) memcpy(result_buf, params_json, pl + 1);
     return 1;
 }
 
 static int status_handler(const char *params_json, char *result_buf, size_t result_buf_size) {
     (void)params_json;
-    snprintf(result_buf,
-             result_buf_size,
-             "{\"server\":\"c-mcp-server\",\"protocol\":\"MCP\",\"version\":\"1.0\",\"status\":\"ready\"}");
+    const char *s = "{\"server\":\"c-mcp-server\",\"protocol\":\"MCP\",\"version\":\"1.0\",\"status\":\"ready\"}";
+    size_t sl = strlen(s);
+    if (sl < result_buf_size) memcpy(result_buf, s, sl + 1);
     return 1;
 }
 

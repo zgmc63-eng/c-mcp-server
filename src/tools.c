@@ -104,7 +104,11 @@ static int weather_query_handler(const cJSON *arguments, cJSON *result_obj) {
     const char *unit_symbol = strcmp(unit, "fahrenheit") == 0 ? "°F" : "°C";
 
     char weather_text[256];
-    snprintf(weather_text, sizeof(weather_text), "%s:26%s,Sunny,Humidity65%%", city_item->valuestring, unit_symbol);
+    int wn = snprintf(weather_text, sizeof(weather_text), "%s:26%s,Sunny,Humidity65%%", city_item->valuestring, unit_symbol);
+    if (wn < 0) return 0;
+    if ((size_t)wn >= sizeof(weather_text)) {
+        weather_text[sizeof(weather_text) - 1] = '\0';
+    }
 
     cJSON *content = cJSON_CreateArray();
     cJSON *entry = cJSON_CreateObject();
@@ -172,14 +176,20 @@ static int initialize_handler(const char *params_json, char *result_buf, size_t 
     if (!json_text) {
         return 0;
     }
-    snprintf(result_buf, result_buf_size, "%s", json_text);
+    size_t len = strlen(json_text);
+    if (len >= result_buf_size) {
+        cJSON_free(json_text);
+        return 0;
+    }
+    memcpy(result_buf, json_text, len + 1);
     cJSON_free(json_text);
     return 1;
 }
 
 static int notifications_initialized_handler(const char *params_json, char *result_buf, size_t result_buf_size) {
     (void)params_json;
-    snprintf(result_buf, result_buf_size, "{}");
+    if (result_buf_size < 3) return 0;
+    memcpy(result_buf, "{}", 3);
     return 1;
 }
 
@@ -197,69 +207,96 @@ static int tools_list_handler(const char *params_json, char *result_buf, size_t 
     if (!json_text) {
         return 0;
     }
-    snprintf(result_buf, result_buf_size, "%s", json_text);
+    size_t len2 = strlen(json_text);
+    if (len2 >= result_buf_size) {
+        cJSON_free(json_text);
+        return 0;
+    }
+    memcpy(result_buf, json_text, len2 + 1);
     cJSON_free(json_text);
     return 1;
 }
 
 static int tools_call_handler(const char *params_json, char *result_buf, size_t result_buf_size) {
     /* 解析 tools/call 请求参数并查找目标工具。*/
-    cJSON *params = cJSON_Parse(params_json);
+    cJSON *params = NULL;
+    cJSON *arguments_owned = NULL;
+    cJSON *tool_result = NULL;
+    char *json_text = NULL;
+    int result = 0;
+
+    params = cJSON_Parse(params_json);
     if (params == NULL || !cJSON_IsObject(params)) {
-        snprintf(result_buf, result_buf_size, "{\"content\":[],\"isError\":true,\"error\":\"Invalid params\"}");
-        cJSON_Delete(params);
-        return 1;
+        const char *err = "{\"content\":[],\"isError\":true,\"error\":\"Invalid params\"}";
+        size_t el = strlen(err);
+        if (el < result_buf_size) memcpy(result_buf, err, el + 1);
+        result = 1;
+        goto cleanup;
     }
 
     cJSON *name = cJSON_GetObjectItemCaseSensitive(params, "name");
     cJSON *arguments = cJSON_GetObjectItemCaseSensitive(params, "arguments");
-    cJSON *arguments_owned = NULL;
     if (arguments == NULL) {
         /* 如果未传递 arguments，则创建一个空对象，避免 NULL 处理。*/
         arguments_owned = cJSON_CreateObject();
         arguments = arguments_owned;
     }
     if (!cJSON_IsString(name) || name->valuestring == NULL || !cJSON_IsObject(arguments)) {
-        snprintf(result_buf, result_buf_size, "{\"content\":[],\"isError\":true,\"error\":\"Missing tool name or arguments\"}");
-        cJSON_Delete(arguments_owned);
-        cJSON_Delete(params);
-        return 1;
+        const char *err = "{\"content\":[],\"isError\":true,\"error\":\"Missing tool name or arguments\"}";
+        size_t el = strlen(err);
+        if (el < result_buf_size) memcpy(result_buf, err, el + 1);
+        result = 1;
+        goto cleanup;
     }
 
     const mcp_tool_t *tool = find_tool(name->valuestring);
     if (tool == NULL) {
-        snprintf(result_buf, result_buf_size, "{\"content\":[],\"isError\":true,\"error\":\"Unknown tool\"}");
-        cJSON_Delete(arguments_owned);
-        cJSON_Delete(params);
-        return 1;
+        const char *err = "{\"content\":[],\"isError\":true,\"error\":\"Unknown tool\"}";
+        size_t el = strlen(err);
+        if (el < result_buf_size) memcpy(result_buf, err, el + 1);
+        result = 1;
+        goto cleanup;
     }
 
-    cJSON *tool_result = cJSON_CreateObject();
+    tool_result = cJSON_CreateObject();
     if (!tool_result) {
-        cJSON_Delete(arguments_owned);
-        cJSON_Delete(params);
-        return 0;
+        goto cleanup;
     }
 
     /* 调用工具处理函数并将结果封装进 tool_result。*/
     if (!tool->handler(arguments, tool_result)) {
-        cJSON_Delete(tool_result);
-        snprintf(result_buf, result_buf_size, "{\"content\":[],\"isError\":true,\"error\":\"Tool execution failed\"}");
-        cJSON_Delete(arguments_owned);
-        cJSON_Delete(params);
-        return 1;
+        const char *err = "{\"content\":[],\"isError\":true,\"error\":\"Tool execution failed\"}";
+        size_t el = strlen(err);
+        if (el < result_buf_size) memcpy(result_buf, err, el + 1);
+        result = 1;
+        goto cleanup;
     }
 
-    char *json_text = print_json(tool_result);
-    cJSON_Delete(tool_result);
-    cJSON_Delete(params);
-    cJSON_Delete(arguments_owned);
+    json_text = print_json(tool_result);
     if (!json_text) {
-        return 0;
+        goto cleanup;
     }
-    snprintf(result_buf, result_buf_size, "%s", json_text);
-    cJSON_free(json_text);
-    return 1;
+    size_t len3 = strlen(json_text);
+    if (len3 >= result_buf_size) {
+        goto cleanup;
+    }
+    memcpy(result_buf, json_text, len3 + 1);
+    result = 1;
+
+cleanup:
+    if (json_text) {
+        cJSON_free(json_text);
+    }
+    if (tool_result) {
+        cJSON_Delete(tool_result);
+    }
+    if (arguments_owned) {
+        cJSON_Delete(arguments_owned);
+    }
+    if (params) {
+        cJSON_Delete(params);
+    }
+    return result;
 }
 
 static int session_close_handler(const char *params_json, char *result_buf, size_t result_buf_size) {
@@ -271,7 +308,8 @@ static int session_close_handler(const char *params_json, char *result_buf, size
     if (!json_text) {
         return 0;
     }
-    snprintf(result_buf, result_buf_size, "%s", json_text);
+    size_t sl = strlen(json_text);
+    if (sl < result_buf_size) memcpy(result_buf, json_text, sl + 1);
     cJSON_free(json_text);
     return 1;
 }
